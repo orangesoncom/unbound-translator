@@ -19,6 +19,10 @@ The current injector uses a hybrid strategy:
 
 This avoids expanding the ROM while still allowing longer translations where the original text was pointer-based.
 
+## Free Space
+
+This relocation approach was possible because Pokémon Unbound still has `1,102,003` bytes of free space available in the ROM. Those regions are detected by scanning for contiguous `0xFF` blocks and are used as targets for translated strings that no longer fit in their original locations.
+
 ## Workflow
 
 Put the source ROM somewhere in the repo, for example:
