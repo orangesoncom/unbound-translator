@@ -3,7 +3,9 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -49,22 +51,27 @@ class SkippedTranslation:
 
 
 class RateLimiter:
-    def __init__(self, calls_per_minute):
+    def __init__(self, calls_per_minute, wait_callback=None):
         self.interval = 60.0 / calls_per_minute if calls_per_minute > 0 else 0.0
         self.lock = threading.Lock()
         self.next_call_at = 0.0
+        self.wait_callback = wait_callback
 
     def wait(self):
         if self.interval <= 0:
             return
 
         with self.lock:
-            now = time.monotonic()
-            wait_seconds = max(0.0, self.next_call_at - now)
-            self.next_call_at = max(now, self.next_call_at) + self.interval
-
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
+            while True:
+                remaining = self.next_call_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                if self.wait_callback:
+                    self.wait_callback(remaining)
+                time.sleep(min(1.0, remaining))
+            self.next_call_at = time.monotonic() + self.interval
+            if self.wait_callback:
+                self.wait_callback(None)
 
 
 def iter_entries(data):
@@ -212,6 +219,57 @@ def make_plain_single_system_prompt(target):
     )
 
 
+def make_codex_batch_prompt(batch, target):
+    return (
+        "You are being used as a non-interactive translation engine.\n"
+        "Do not inspect files, run commands, or modify the workspace.\n"
+        "Translate the provided Pokemon Unbound text and return only the final JSON.\n\n"
+        f"{make_system_prompt(target)}\n"
+        f"Input JSON:\n{make_user_prompt(batch, target)}\n"
+    )
+
+
+def make_codex_single_prompt(item, target):
+    return (
+        "You are being used as a non-interactive translation engine.\n"
+        "Do not inspect files, run commands, or modify the workspace.\n"
+        "Translate the provided Pokemon Unbound text and return only the final JSON.\n\n"
+        f"{make_single_system_prompt(target)}\n"
+        f"Input JSON:\n{make_single_user_prompt(item, target)}\n"
+    )
+
+
+BATCH_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "translations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "translated": {"type": "string"},
+                },
+                "required": ["id", "translated"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["translations"],
+    "additionalProperties": False,
+}
+
+
+SINGLE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "translated": {"type": "string"},
+    },
+    "required": ["translated"],
+    "additionalProperties": False,
+}
+
+
 def api_endpoint(api_base):
     base = api_base.rstrip("/")
     if base.endswith("/chat/completions"):
@@ -334,6 +392,13 @@ def clean_plain_translation(content):
     if not text:
         raise RetryableTranslationError("API returned an empty plain translation.")
     return text
+
+
+def compact_error_detail(text, limit=1000):
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 class OpenAICompatibleClient:
@@ -515,6 +580,142 @@ class OpenAICompatibleClient:
         return content
 
 
+class CodexExecClient:
+    def __init__(
+        self,
+        codex_command,
+        model,
+        profile,
+        timeout,
+        rate_limiter,
+    ):
+        self.codex_command = codex_command
+        self.model = model
+        self.profile = profile
+        self.timeout = timeout
+        self.rate_limiter = rate_limiter
+
+    def translate_batch(self, batch, target):
+        try:
+            return self.translate_batch_with_retries(batch, target)
+        except RetryableTranslationError:
+            if len(batch) <= 1:
+                raise
+            translations = []
+            for item in batch:
+                translations.append(self.translate_single_item(item, target))
+            return translations
+
+    def translate_batch_with_retries(self, batch, target):
+        last_error = None
+        for attempt in range(1, MAX_API_ATTEMPTS + 1):
+            try:
+                return self.translate_batch_once(batch, target)
+            except RetryableTranslationError as exc:
+                last_error = exc
+                if attempt == MAX_API_ATTEMPTS:
+                    break
+                time.sleep(min(2 ** (attempt - 1), 8))
+
+        raise TranslationError(
+            f"Codex request failed after {MAX_API_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
+
+    def translate_batch_once(self, batch, target):
+        parsed = self.run_codex_json(
+            make_codex_batch_prompt(batch, target),
+            BATCH_OUTPUT_SCHEMA,
+        )
+        return validate_translations(parsed, batch)
+
+    def translate_single_item(self, item, target):
+        last_error = None
+        for attempt in range(1, MAX_API_ATTEMPTS + 1):
+            try:
+                parsed = self.run_codex_json(
+                    make_codex_single_prompt(item, target),
+                    SINGLE_OUTPUT_SCHEMA,
+                )
+                return validate_single_translation(parsed)
+            except RetryableTranslationError as exc:
+                last_error = exc
+                if attempt == MAX_API_ATTEMPTS:
+                    break
+                time.sleep(min(2 ** (attempt - 1), 8))
+
+        raise TranslationError(
+            f"Codex single-item request failed after {MAX_API_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
+
+    def run_codex_json(self, prompt, schema):
+        with tempfile.TemporaryDirectory(prefix="llm-translate-codex-") as tmpdir:
+            schema_path = Path(tmpdir) / "schema.json"
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+
+            command = [
+                self.codex_command,
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--cd",
+                tmpdir,
+                "--output-schema",
+                str(schema_path),
+            ]
+            if self.model:
+                command.extend(["--model", self.model])
+            if self.profile:
+                command.extend(["--profile", self.profile])
+            command.append("-")
+
+            self.rate_limiter.wait()
+            try:
+                result = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout,
+                    cwd=tmpdir,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                raise TranslationError(
+                    f"Codex command not found: {self.codex_command!r}. "
+                    "Install Codex CLI or pass --codex-command."
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RetryableTranslationError(
+                    f"codex exec timed out after {self.timeout:g}s"
+                ) from exc
+
+        if result.returncode != 0:
+            detail = compact_error_detail(result.stderr or result.stdout)
+            lower_detail = detail.lower()
+            message = f"codex exec failed with exit code {result.returncode}: {detail}"
+            if any(
+                token in lower_detail
+                for token in (
+                    "auth",
+                    "login",
+                    "log in",
+                    "unauthorized",
+                    "forbidden",
+                    "invalid api key",
+                    "no valid session",
+                )
+            ):
+                raise TranslationError(message)
+            raise RetryableTranslationError(message)
+
+        content = result.stdout.strip()
+        if not content:
+            raise RetryableTranslationError("codex exec returned an empty final message.")
+        return parse_model_json(content)
+
+
 def build_work_items(data):
     work = []
     skipped_empty = 0
@@ -558,14 +759,20 @@ def progress_bar(completed, total, width=36):
     return f"[{'#' * filled}{'.' * empty}] {percent:6.2f}% ({completed}/{total})"
 
 
-def render_progress(completed, total):
-    sys.stdout.write("\r" + progress_bar(completed, total))
+def render_progress(completed, total, status=None):
+    text = progress_bar(completed, total)
+    if status:
+        text = f"{text} | {status}"
+    sys.stdout.write("\r" + text + "\x1b[K")
     sys.stdout.flush()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Translate extracted Pokemon Unbound text with an OpenAI-compatible API."
+        description=(
+            "Translate extracted Pokemon Unbound text with an OpenAI-compatible API "
+            "or a local Codex ChatGPT login."
+        )
     )
     parser.add_argument("input", help="Extracted JSON file to translate.")
     parser.add_argument(
@@ -580,19 +787,48 @@ def parse_args():
         help="Target Latin-script language code. Supported: %(choices)s.",
     )
     parser.add_argument(
+        "--auth",
+        choices=("api-key", "chatgpt"),
+        default=os.environ.get("LLM_TRANSLATE_AUTH", "api-key"),
+        help=(
+            "Authentication backend. Use api-key for an OpenAI-compatible "
+            "chat completions API, or chatgpt to reuse Codex CLI ChatGPT login. "
+            "Defaults to LLM_TRANSLATE_AUTH or api-key."
+        ),
+    )
+    parser.add_argument(
         "--api-base",
         default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        help="OpenAI-compatible API base URL. Defaults to OPENAI_BASE_URL or OpenAI v1.",
+        help=(
+            "OpenAI-compatible API base URL for --auth api-key. "
+            "Defaults to OPENAI_BASE_URL or OpenAI v1."
+        ),
     )
     parser.add_argument(
         "--api-key",
         default=os.environ.get("OPENAI_API_KEY"),
-        help="API key. Defaults to OPENAI_API_KEY.",
+        help="API key for --auth api-key. Defaults to OPENAI_API_KEY.",
     )
     parser.add_argument(
         "--model",
         default=os.environ.get("OPENAI_MODEL"),
-        help="Model name. Defaults to OPENAI_MODEL.",
+        help=(
+            "Model name. Required for --auth api-key; optional Codex model "
+            "override for --auth chatgpt. Defaults to OPENAI_MODEL."
+        ),
+    )
+    parser.add_argument(
+        "--codex-command",
+        default=os.environ.get("CODEX_COMMAND", "codex"),
+        help=(
+            "Codex CLI executable for --auth chatgpt. Defaults to CODEX_COMMAND "
+            "or codex."
+        ),
+    )
+    parser.add_argument(
+        "--codex-profile",
+        default=os.environ.get("CODEX_PROFILE"),
+        help="Optional Codex config profile for --auth chatgpt. Defaults to CODEX_PROFILE.",
     )
     parser.add_argument(
         "--workers",
@@ -649,10 +885,18 @@ def parse_args():
 
 
 def validate_args(args, output_path):
-    if not args.api_key:
-        raise SystemExit("error: --api-key is required or OPENAI_API_KEY must be set")
-    if not args.model:
-        raise SystemExit("error: --model is required or OPENAI_MODEL must be set")
+    if args.auth not in {"api-key", "chatgpt"}:
+        raise SystemExit("error: --auth must be either api-key or chatgpt")
+    if args.auth == "api-key" and not args.api_key:
+        raise SystemExit(
+            "error: --api-key is required or OPENAI_API_KEY must be set when --auth api-key"
+        )
+    if args.auth == "api-key" and not args.model:
+        raise SystemExit(
+            "error: --model is required or OPENAI_MODEL must be set when --auth api-key"
+        )
+    if args.auth == "chatgpt" and not args.codex_command:
+        raise SystemExit("error: --codex-command must not be empty when --auth chatgpt")
     if args.workers < 1:
         raise SystemExit("error: --workers must be >= 1")
     if args.batch_size < 1:
@@ -695,6 +939,7 @@ def main():
     print(f"already translated: {already_translated}")
     print(f"missing translations: {len(work)}")
     print(f"skipped empty originals: {skipped_empty}")
+    print(f"auth backend: {args.auth}")
 
     if not work:
         save_json(output_path, data)
@@ -709,23 +954,40 @@ def main():
     for batch_number, batch in batches:
         batch_queue.put((batch_number, batch))
 
-    client = OpenAICompatibleClient(
-        args.api_base,
-        args.api_key,
-        args.model,
-        args.max_tokens,
-        args.temperature,
-        args.timeout,
-        args.user_agent,
-        RateLimiter(args.rate_limit),
-    )
-
     lock = threading.Lock()
     stop_event = threading.Event()
     errors = []
     translated_this_run = 0
     skipped_token_limit = 0
     completed_total = already_translated
+
+    def show_rate_limit_wait(wait_seconds):
+        status = None
+        if wait_seconds is not None:
+            status = f"waiting for rate limit reset ({wait_seconds:.1f}s)"
+        with lock:
+            render_progress(completed_total, total_translatable, status)
+
+    rate_limiter = RateLimiter(args.rate_limit, show_rate_limit_wait)
+    if args.auth == "chatgpt":
+        client = CodexExecClient(
+            args.codex_command,
+            args.model,
+            args.codex_profile,
+            args.timeout,
+            rate_limiter,
+        )
+    else:
+        client = OpenAICompatibleClient(
+            args.api_base,
+            args.api_key,
+            args.model,
+            args.max_tokens,
+            args.temperature,
+            args.timeout,
+            args.user_agent,
+            rate_limiter,
+        )
 
     render_progress(completed_total, total_translatable)
 

@@ -2,22 +2,129 @@
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from injector import (
-    Charmap,
-    GBA_POINTER_BASE,
-    encode_text,
-    fit_to_slot,
-    iter_entries,
-    parse_address,
-    strip_hma_quotes,
-)
+from pcs_text import Charmap, fc_arg_count
 
 
+GBA_POINTER_BASE = 0x08000000
 DEFAULT_MIN_ADDRESS = 0x100
 DEFAULT_MIN_FREE_RUN = 0x1000
+TERMINATOR = 0xFF
+
+
+def parse_address(value):
+    if isinstance(value, int):
+        address = value
+    elif isinstance(value, str):
+        address = int(value, 16) if value.lower().startswith("0x") else int(value)
+    else:
+        raise ValueError(f"Invalid address: {value!r}")
+
+    if address >= GBA_POINTER_BASE:
+        address -= GBA_POINTER_BASE
+    return address
+
+
+def strip_hma_quotes(text):
+    if isinstance(text, str) and len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        return text[1:-1]
+    return text or ""
+
+
+def byte_placeholders(values):
+    return "".join(f"{{{value:02X}}}" for value in values)
+
+
+def normalize_text_escapes(text):
+    """Convert legacy HMA escape forms to raw byte placeholders."""
+
+    text = re.sub(
+        r"\\\\([0-9A-Fa-f]{2})",
+        lambda match: byte_placeholders((0xFD, int(match.group(1), 16))),
+        text,
+    )
+
+    def raw_bytes(match):
+        hex_text = re.sub(r"\s+", "", match.group(1))
+        if len(hex_text) % 2:
+            hex_text = hex_text[:-1]
+        values = [int(hex_text[index : index + 2], 16) for index in range(0, len(hex_text), 2)]
+        return byte_placeholders(values)
+
+    text = re.sub(r"\\!((?:\s*[0-9A-Fa-f]{2})+)", raw_bytes, text)
+    text = re.sub(
+        r"\\\?([0-9A-Fa-f]{2})",
+        lambda match: byte_placeholders((0xF7, int(match.group(1), 16))),
+        text,
+    )
+    text = re.sub(
+        r"\\9([0-9A-Fa-f]{2})",
+        lambda match: byte_placeholders((0xF9, int(match.group(1), 16))),
+        text,
+    )
+    text = re.sub(
+        r"\\F([0-9A-Fa-f])",
+        lambda match: byte_placeholders((int("F" + match.group(1), 16),)),
+        text,
+    )
+
+    return text
+
+
+def encode_text(cmap, text):
+    return bytes(cmap.encode(normalize_text_escapes(strip_hma_quotes(text))))
+
+
+def truncate_encoded(encoded, max_size):
+    if max_size <= 0:
+        return b""
+    if len(encoded) <= max_size and encoded.endswith(bytes((TERMINATOR,))):
+        return encoded
+    if max_size == 1:
+        return bytes((TERMINATOR,))
+
+    limit = max_size - 1
+    out = bytearray()
+    index = 0
+
+    while index < len(encoded):
+        byte = encoded[index]
+        if byte == TERMINATOR:
+            break
+
+        token_len = 1
+        if byte == 0xFC and index + 1 < len(encoded):
+            token_len = 2 + fc_arg_count(encoded[index + 1])
+        elif byte in (0xF7, 0xF8, 0xF9, 0xFD):
+            token_len = 2
+
+        if index + token_len > len(encoded) or len(out) + token_len > limit:
+            break
+
+        out.extend(encoded[index : index + token_len])
+        index += token_len
+
+    out.append(TERMINATOR)
+    return bytes(out)
+
+
+def fit_to_slot(encoded, max_size, pad_byte):
+    if len(encoded) > max_size or not encoded.endswith(bytes((TERMINATOR,))):
+        encoded = truncate_encoded(encoded, max_size)
+    return encoded.ljust(max_size, bytes((pad_byte,)))
+
+
+def iter_entries(data):
+    for table in data.get("tables", []):
+        for entry in table.get("entries", []):
+            yield entry
+    for entry in data.get("free_texts", []):
+        yield entry
+    for entry in data.get("entries", []):
+        yield entry
 
 
 @dataclass

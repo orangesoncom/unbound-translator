@@ -72,9 +72,21 @@ If the translation is interrupted, resume from the existing output JSON:
   --resume
 ```
 
-The script uses an OpenAI-compatible chat completions API. It validates every returned batch. If a batch reaches the API output token limit, the script falls back to translating each entry individually; if a single-entry request still reaches the limit, it retries that entry with a compact single-item prompt and then a plain-text prompt using the same model. If the entry still cannot be translated because of the output token limit, the script prints a warning with the entry id, leaves that entry untranslated, and continues.
+The script defaults to an OpenAI-compatible chat completions API. It validates every returned batch. If a batch reaches the API output token limit, the script falls back to translating each entry individually; if a single-entry request still reaches the limit, it retries that entry with a compact single-item prompt and then a plain-text prompt using the same model. If the entry still cannot be translated because of the output token limit, the script prints a warning with the entry id, leaves that entry untranslated, and continues.
 
-Translation progress is shown as a fixed `0` to `100%` progress bar based on the total translatable entries in the file, so resumed runs continue from the already completed percentage.
+To use a ChatGPT subscription login instead of an API key, install and log in with the Codex CLI first (`codex login`), or provide `CODEX_ACCESS_TOKEN`. Then run the translator with `--auth chatgpt`; this delegates model calls to `codex exec` and reuses Codex's saved ChatGPT credentials:
+
+```bash
+./llm_translate.py out/unbound-texts.json \
+  --target it \
+  --auth chatgpt \
+  --model gpt-5.4 \
+  --workers 1 \
+  --batch-size 10 \
+  -o out/unbound-texts-it.json
+```
+
+Translation progress is shown as a fixed `0` to `100%` progress bar based on the total translatable entries in the file, so resumed runs continue from the already completed percentage. When `--rate-limit` makes the script wait before the next API call, the progress bar temporarily shows a shared `waiting for rate limit reset` countdown and clears it once the wait is over.
 
 Transient API failures such as empty responses, non-JSON HTTP responses, invalid model JSON, missing choices, and server/network errors are retried up to 3 total attempts. Unauthorized requests, forbidden requests, rate-limit responses, other 4xx client errors, and partial or mismatched batch responses stop immediately.
 
