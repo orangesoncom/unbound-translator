@@ -5,7 +5,8 @@ import json
 import re
 from pathlib import Path
 
-from pcs_text import Charmap
+from lib.pcs_text import Charmap
+from lib.translation_tokens import remove_layout_tokens, visible_width
 
 
 TOKEN_RE = re.compile(
@@ -41,6 +42,9 @@ COLOR_TOKENS = {
     "[navyblue]",
     "[darknavyblue]",
 }
+
+DEFAULT_WRAP_CATEGORIES = "scripts,move_descriptions,ability_descriptions,trade_messages"
+DESCRIPTION_CATEGORIES = {"move_descriptions", "ability_descriptions"}
 
 
 def iter_entries(data):
@@ -291,6 +295,107 @@ def control_sequence(text):
     return [token for _s, _e, token in token_spans(text, critical_token)]
 
 
+def normalize_actual_layout_breaks(text):
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def paragraph_repl(match):
+        count = len(match.group(0))
+        return "\\p" * (count // 2) + ("\\n" if count % 2 else "")
+
+    text = re.sub(r"\n{2,}", paragraph_repl, text)
+    return text.replace("\n", "\\n")
+
+
+def technical_token_count(text):
+    tokens = [
+        token
+        for _start, _end, token in token_spans(text)
+        if token not in LAYOUT_TOKENS and token not in COLOR_TOKENS
+    ]
+    raw_like = [
+        token
+        for token in tokens
+        if token.startswith("\\!")
+        or token.startswith("\\?")
+        or token.startswith("\\9")
+        or token.startswith("\\CC")
+    ]
+    return len(tokens), len(raw_like)
+
+
+def should_skip_wrap(text):
+    token_count, raw_like_count = technical_token_count(text)
+    return token_count > 32 or raw_like_count > 8
+
+
+def wrap_width_for_entry(entry, args):
+    if entry.get("category") in DESCRIPTION_CATEGORIES:
+        return args.description_wrap_width
+    return args.wrap_width
+
+
+def wrap_words(text, width):
+    words = text.split()
+    lines = []
+    current = []
+    current_width = 0
+    long_words = 0
+
+    for word in words:
+        word_width = visible_width(word)
+        if word_width > width:
+            long_words += 1
+
+        added_width = word_width if not current else current_width + 1 + word_width
+        if current and added_width > width:
+            lines.append(" ".join(current))
+            current = [word]
+            current_width = word_width
+        else:
+            current.append(word)
+            current_width = added_width
+
+    if current:
+        lines.append(" ".join(current))
+    return lines, long_words
+
+
+def join_script_lines(lines):
+    pages = []
+    for start in range(0, len(lines), 3):
+        page = lines[start : start + 3]
+        if not page:
+            continue
+        text = page[0]
+        if len(page) >= 2:
+            text += "\n" + page[1]
+        if len(page) >= 3:
+            text += "\\l" + page[2]
+        pages.append(text)
+    return "\n\n".join(pages)
+
+
+def join_wrapped_lines(lines, entry):
+    if entry.get("category") in DESCRIPTION_CATEGORIES:
+        return "\n".join(lines)
+    return join_script_lines(lines)
+
+
+def wrap_translation(text, entry, args, wrap_categories):
+    if args.no_wrap or entry.get("category") not in wrap_categories:
+        return text, False, 0, False
+    if should_skip_wrap(text):
+        return text, False, 0, True
+
+    plain_text, _removed_layout = remove_layout_tokens(text)
+    if not plain_text:
+        return text, False, 0, False
+
+    lines, long_words = wrap_words(plain_text, wrap_width_for_entry(entry, args))
+    wrapped = join_wrapped_lines(lines, entry)
+    return wrapped, wrapped != text, long_words, False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Repair translated JSON control codes and apostrophes."
@@ -316,11 +421,37 @@ def main():
         "--report",
         help="Optional JSON report listing entries whose critical controls still differ.",
     )
+    parser.add_argument(
+        "--no-wrap",
+        action="store_true",
+        help="Disable post-translation text wrapping/layout recomputation.",
+    )
+    parser.add_argument(
+        "--wrap-width",
+        type=int,
+        default=35,
+        help="Visible character width for dialogue wrapping. Default: 35.",
+    )
+    parser.add_argument(
+        "--description-wrap-width",
+        type=int,
+        default=24,
+        help="Visible character width for move/ability descriptions. Default: 24.",
+    )
+    parser.add_argument(
+        "--wrap-categories",
+        default=DEFAULT_WRAP_CATEGORIES,
+        help=(
+            "Comma-separated categories to wrap. "
+            f"Default: {DEFAULT_WRAP_CATEGORIES}."
+        ),
+    )
     args = parser.parse_args()
 
     data = json.loads(Path(args.input).read_text(encoding="utf-8"))
     originals = source_originals(args.source)
     cmap = Charmap(target_lang="it")
+    wrap_categories = {category.strip() for category in args.wrap_categories.split(",") if category.strip()}
 
     stats = {
         "entries": 0,
@@ -332,6 +463,10 @@ def main():
         "deduped_controls": 0,
         "cc_hex_escapes": 0,
         "apostrophe_repairs": 0,
+        "actual_newline_repairs": 0,
+        "wrapped": 0,
+        "wrap_long_words": 0,
+        "wrap_skipped_technical": 0,
         "remaining_control_mismatches": 0,
     }
     remaining = []
@@ -349,6 +484,10 @@ def main():
         text = translated
 
         text = normalize_outer_quotes(text)
+
+        next_text = normalize_actual_layout_breaks(text)
+        stats["actual_newline_repairs"] += int(next_text != text)
+        text = next_text
 
         next_text = normalize_braced_controls(text)
         stats["braced_controls"] += int(next_text != text)
@@ -372,6 +511,14 @@ def main():
 
         next_text = fix_apostrophes(text)
         stats["apostrophe_repairs"] += int(next_text != text)
+        text = next_text
+
+        next_text, wrapped, long_words, skipped_wrap = wrap_translation(
+            text, entry, args, wrap_categories
+        )
+        stats["wrapped"] += int(wrapped)
+        stats["wrap_long_words"] += long_words
+        stats["wrap_skipped_technical"] += int(skipped_wrap)
         text = next_text
 
         if text != before:

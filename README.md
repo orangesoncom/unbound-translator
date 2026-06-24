@@ -40,15 +40,27 @@ The ROM used for this project has MD5:
 ### 1. Extract Text
 
 ```bash
-./extract_unbound_text.py rom/unbound.gba -o out/unbound-texts.json
+./001_extract_unbound_text.py rom/unbound.gba -o out/unbound-texts.json
 ```
 
-Translate the generated JSON while preserving its structure. Each entry should keep its `original` field and receive a `translated` field.
+This step extracts text as-is from the ROM. It should stay lossless and should not try to reshape dialogue layout.
 
-### 2. Translate Text
+The extractor intentionally reads 255 ability descriptions even though the ROM has 293 ability names. The words after ability-description index 254 are not text pointers and decode as garbage, so they are skipped.
+
+### 2. Prepare Translation Text
 
 ```bash
-./llm_translate.py out/unbound-texts.json \
+./002_prepare_translation_text.py out/unbound-texts.json -o out/unbound-texts-prepared.json
+```
+
+This adds a `translation_source` field to each entry. The `original` field stays untouched, while `translation_source` removes layout markers such as actual line breaks, `\n`, `\l`, `\p`, and `\pn`.
+
+Semantic/control tokens are preserved because the game engine needs them. Examples include variables like `[player]`, buffer placeholders like `[buffer1]`, color tags like `[red]`, byte/control escapes like `\CC12`, button icons like `\btn01`, Pokémon glyph tokens like `\pk` and `\mn`, quote tokens like `\qo` and `\qc`, and raw byte placeholders like `{B4}`.
+
+### 3. Translate Text
+
+```bash
+./003_llm_translate.py out/unbound-texts-prepared.json \
   --target it \
   --api-base https://opencode.ai/zen/go/v1 \
   --api-key YOUR_API_KEY \
@@ -61,7 +73,7 @@ Translate the generated JSON while preserving its structure. Each entry should k
 If the translation is interrupted, resume from the existing output JSON:
 
 ```bash
-./llm_translate.py out/unbound-texts.json \
+./003_llm_translate.py out/unbound-texts-prepared.json \
   --target it \
   --api-base https://opencode.ai/zen/go/v1 \
   --api-key YOUR_API_KEY \
@@ -74,10 +86,14 @@ If the translation is interrupted, resume from the existing output JSON:
 
 The script defaults to an OpenAI-compatible chat completions API. It validates every returned batch. If a batch reaches the API output token limit, the script falls back to translating each entry individually; if a single-entry request still reaches the limit, it retries that entry with a compact single-item prompt and then a plain-text prompt using the same model. If the entry still cannot be translated because of the output token limit, the script prints a warning with the entry id, leaves that entry untranslated, and continues.
 
+The translator uses `translation_source` when present. After each model response, it checks that every semantic/control token from the English source is still present in the translation with the same count, and that no extra protected tokens or layout markers were added. If the check fails, it prints a warning and retries the translation.
+
+If the script has to fall back to a single-entry prompt, it prints a warning with the affected entry id. These cases use less context than the normal batch prompt and may produce less accurate translations, so they are worth reviewing and keeping as rare as possible.
+
 To use a ChatGPT subscription login instead of an API key, install and log in with the Codex CLI first (`codex login`), or provide `CODEX_ACCESS_TOKEN`. Then run the translator with `--auth chatgpt`; this delegates model calls to `codex exec` and reuses Codex's saved ChatGPT credentials:
 
 ```bash
-./llm_translate.py out/unbound-texts.json \
+./003_llm_translate.py out/unbound-texts-prepared.json \
   --target it \
   --auth chatgpt \
   --model gpt-5.4 \
@@ -88,12 +104,12 @@ To use a ChatGPT subscription login instead of an API key, install and log in wi
 
 Translation progress is shown as a fixed `0` to `100%` progress bar based on the total translatable entries in the file, so resumed runs continue from the already completed percentage. When `--rate-limit` makes the script wait before the next API call, the progress bar temporarily shows a shared `waiting for rate limit reset` countdown and clears it once the wait is over.
 
-Transient API failures such as empty responses, non-JSON HTTP responses, invalid model JSON, missing choices, and server/network errors are retried up to 3 total attempts. Unauthorized requests, forbidden requests, rate-limit responses, other 4xx client errors, and partial or mismatched batch responses stop immediately.
+Transient API failures such as empty responses, non-JSON HTTP responses, invalid model JSON, missing choices, semantic/control-token mismatches, and server/network errors are retried up to 3 total attempts. Unauthorized requests, forbidden requests, rate-limit responses, other 4xx client errors, and partial or mismatched batch responses stop immediately.
 
 For slow or free-tier APIs, use `--rate-limit` to cap total API calls per minute across all workers:
 
 ```bash
-./llm_translate.py out/unbound-texts.json \
+./003_llm_translate.py out/unbound-texts-prepared.json \
   --target it \
   --api-base https://opencode.ai/zen/go/v1 \
   --api-key YOUR_API_KEY \
@@ -109,23 +125,23 @@ For OpenCode, use `--api-base https://opencode.ai/zen/go/v1`; the script appends
 
 For now, only Latin-script target languages are supported by the translation script because non-Latin languages will likely require a font patch. The prompt asks the model to use established official Pokémon terminology for moves, items, abilities, descriptions, and common franchise text. If the selected API/model has web or retrieval access, it is instructed to consult reputable Pokémon references such as Bulbapedia or Pokémon Database; plain OpenAI-compatible chat APIs usually do not browse the web by themselves.
 
-### 3. Repair Control Codes
+### 4. Repair Control Codes And Layout
 
 Run the control-fix script after translation:
 
 ```bash
-./controlfix_translations.py out/unbound-texts-it.json \
+./004_controlfix_translations.py out/unbound-texts-it.json \
   -o out/unbound-texts-it-controlfix.json \
-  --source out/unbound-texts.json \
+  --source out/unbound-texts-prepared.json \
   --report out/controlfix-report.json
 ```
 
-This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes.
+This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes. It also recomputes layout after translation: dialogue-like text is wrapped into pages using line breaks and `\l`, while move and ability descriptions are wrapped with regular line breaks.
 
-### 4. Inject Translation
+### 5. Inject Translation
 
 ```bash
-./hybrid_injector.py rom/unbound.gba out/unbound-texts-it-controlfix.json \
+./005_hybrid_injector.py rom/unbound.gba out/unbound-texts-it-controlfix.json \
   -o out/unbound-translated.gba \
   --map-output out/hybrid-map.json
 ```

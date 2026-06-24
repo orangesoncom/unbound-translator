@@ -5,51 +5,61 @@ This repository is `unbound-translator`, a Python toolchain for translating Poke
 ## Project Context
 
 - Pokemon Unbound is already a 32 MB GBA ROM, so the old Meowth-GBA-Translator approach of expanding the ROM to 32 MB and writing all text into one dedicated area is not suitable here.
-- The project now uses custom scripts and a local PCS text codec in `pcs_text.py`.
+- The project now uses custom scripts and a local PCS text codec in `lib/pcs_text.py`.
 - Text relocation works because the ROM has `1,102,003` bytes of detected free space. The injector finds this space by scanning contiguous `0xFF` blocks.
 - The injection strategy is hybrid: short translated text is written in place, and longer pointer-based text is relocated into detected free space with script pointers updated to the new addresses.
 - The source ROM used by this project has MD5 `9cad8e771940e7f7094d13911552cef0`.
 
 ## Main Scripts
 
-- `extract_unbound_text.py`: extracts text from the ROM into JSON. The expected output shape is a JSON object containing an `entries` array, though some utilities also tolerate older `tables` and `free_texts` shapes.
-- `llm_translate.py`: translates extracted JSON through an OpenAI-compatible chat completions API or a Codex CLI ChatGPT login. It preserves the JSON shape, fills `translated` fields, supports `--resume`, validates returned batches, and stops on partial or malformed model output.
-- `controlfix_translations.py`: repairs translated control codes, quote tokens, apostrophes, and other formatting damage caused by translation.
-- `hybrid_injector.py`: injects translated text into the ROM using in-place writes and pointer relocation into free `0xFF` space.
-- `pcs_text.py`: local PCS charmap and codec. Do not reintroduce Meowth charmap dependencies.
+- `001_extract_unbound_text.py`: extracts text from the ROM into JSON. The expected output shape is a JSON object containing an `entries` array, though some utilities also tolerate older `tables` and `free_texts` shapes.
+- `002_prepare_translation_text.py`: adds layout-free `translation_source` fields to extracted JSON while preserving each entry's original ROM text. It removes layout markers only; semantic/control tokens stay in the translation source.
+- `003_llm_translate.py`: translates prepared JSON through an OpenAI-compatible chat completions API or a Codex CLI ChatGPT login. It preserves the JSON shape, fills `translated` fields, supports `--resume`, validates returned batches, and retries model output that drops/adds semantic/control tokens.
+- `004_controlfix_translations.py`: repairs translated control codes, quote tokens, apostrophes, and other formatting damage caused by translation. It also recomputes post-translation text wrapping/layout for dialogue and description-like text.
+- `005_hybrid_injector.py`: injects translated text into the ROM using in-place writes and pointer relocation into free `0xFF` space.
+- `lib/pcs_text.py`: local PCS charmap and codec. Do not reintroduce Meowth charmap dependencies.
+- `lib/translation_tokens.py`: shared layout and semantic/control token helpers used by prepare, translation, and layout repair code.
 
 ## Workflow
 
 Use this baseline flow:
 
 ```bash
-./extract_unbound_text.py rom/unbound.gba -o out/unbound-texts.json
-./llm_translate.py out/unbound-texts.json --target it --api-base https://opencode.ai/zen/go/v1 --api-key YOUR_API_KEY --model your-model-name --workers 4 --batch-size 20 -o out/unbound-texts-it.json
-./controlfix_translations.py out/unbound-texts-it.json -o out/unbound-texts-it-controlfix.json --source out/unbound-texts.json --report out/controlfix-report.json
-./hybrid_injector.py rom/unbound.gba out/unbound-texts-it-controlfix.json -o out/unbound-translated.gba --map-output out/hybrid-map.json
+./001_extract_unbound_text.py rom/unbound.gba -o out/unbound-texts.json
+./002_prepare_translation_text.py out/unbound-texts.json -o out/unbound-texts-prepared.json
+./003_llm_translate.py out/unbound-texts-prepared.json --target it --api-base https://opencode.ai/zen/go/v1 --api-key YOUR_API_KEY --model your-model-name --workers 4 --batch-size 20 -o out/unbound-texts-it.json
+./004_controlfix_translations.py out/unbound-texts-it.json -o out/unbound-texts-it-controlfix.json --source out/unbound-texts-prepared.json --report out/controlfix-report.json
+./005_hybrid_injector.py rom/unbound.gba out/unbound-texts-it-controlfix.json -o out/unbound-translated.gba --map-output out/hybrid-map.json
 ```
 
 When resuming LLM translation, use the same input and output paths with `--resume`.
 
 ## Extraction Notes
 
-- A healthy baseline extraction currently reports about `13,733` entries and about `8,897` script entries.
+- A healthy baseline extraction currently reports about `13,695` entries and about `8,897` script entries.
+- Ability names have 293 entries, but `data.abilities.descriptions` only has 255 valid text pointers. Do not expand `ability_descriptions` to match the ability-name count; entries after index 254 decode non-text data as garbage.
 - `Pointer text rejected` in extractor output means candidate pointers were checked and discarded because they did not decode as plausible text. It does not mean translations failed.
 - Do not blindly accept all rejected pointer candidates. If text is missing, add or refine the pointer-source pattern for the specific game system that owns that text.
 - Known strings such as `Choose a character.` and `Choose a skin tone.` are extracted through the script/menu `0x67` pointer pattern.
+- Extraction should remain as-is/lossless. Use `002_prepare_translation_text.py` for translation cleanup instead of changing extracted `original` strings.
 
 ## Translation Notes
 
-- `llm_translate.py` currently supports Latin-script target languages only: `de`, `en`, `es`, `fr`, `it`, `pt`, and `pt-br`.
+- `003_llm_translate.py` currently supports Latin-script target languages only: `de`, `en`, `es`, `fr`, `it`, `pt`, and `pt-br`.
 - Non-Latin target languages are out of scope for now because they likely require a font patch.
+- `002_prepare_translation_text.py` adds `translation_source`; it removes layout markers such as actual line breaks, `\n`, `\l`, `\p`, and `\pn`, while preserving semantic/control tokens.
+- Semantic/control tokens are protected game-engine tokens that must survive translation exactly and in the same count. Examples include `[player]`, `[buffer1]`, `[red]`, `\CC12`, `\btn01`, `\pk`, `\mn`, `\qo`, `\qc`, and `{B4}`.
+- `003_llm_translate.py` uses `translation_source` when present. After each model response it checks semantic/control token counts and retries if a token is missing, duplicated, or invented, or if the model adds layout markers.
+- `003_llm_translate.py` prints a warning when it falls back to a single-entry prompt because that path has less context and can reduce translation accuracy.
 - The LLM prompt asks for established official Pokemon terminology and may ask models with web/retrieval access to consult reputable references such as Bulbapedia or Pokemon Database. Plain OpenAI-compatible chat APIs usually do not browse by themselves.
-- To use a ChatGPT subscription login instead of an API key, run `codex login` first or provide `CODEX_ACCESS_TOKEN`, then run `llm_translate.py` with `--auth chatgpt`. This delegates batches to `codex exec`; `--model` is optional in this mode and overrides the Codex default model when provided.
-- For OpenCode, use `--api-base https://opencode.ai/zen/go/v1`; `llm_translate.py` appends `/chat/completions` automatically. `API HTTP 403: error code: 1010` means the upstream gateway rejected the HTTP request before the model handled it. The script sends a browser-like `User-Agent` by default and exposes `--user-agent` for overrides.
+- To use a ChatGPT subscription login instead of an API key, run `codex login` first or provide `CODEX_ACCESS_TOKEN`, then run `003_llm_translate.py` with `--auth chatgpt`. This delegates batches to `codex exec`; `--model` is optional in this mode and overrides the Codex default model when provided.
+- For OpenCode, use `--api-base https://opencode.ai/zen/go/v1`; `003_llm_translate.py` appends `/chat/completions` automatically. `API HTTP 403: error code: 1010` means the upstream gateway rejected the HTTP request before the model handled it. The script sends a browser-like `User-Agent` by default and exposes `--user-agent` for overrides.
 - Translation progress is shown as a fixed `0` to `100%` bar based on total translatable entries in the full file, not only the entries translated in the current run. During `--rate-limit` sleeps, the bar temporarily shows a shared `waiting for rate limit reset` countdown and clears it after waiting.
-- `llm_translate.py` retries transient API failures up to 3 total attempts. It does not retry unauthorized, forbidden, rate-limit, other 4xx client errors, or partial/mismatched translation batches.
-- If a batch reaches the API output token limit, `llm_translate.py` falls back to translating entries individually. If a single-entry request still reaches the limit, it uses a compact single-item JSON prompt and then a plain-text prompt with the same model. If the entry still cannot be translated because of the output token limit, it prints a warning with the entry id, leaves the entry untranslated, and continues.
+- `003_llm_translate.py` retries transient API failures up to 3 total attempts. It does not retry unauthorized, forbidden, rate-limit, other 4xx client errors, or partial/mismatched translation batches.
+- If a batch reaches the API output token limit, `003_llm_translate.py` falls back to translating entries individually. If a single-entry request still reaches the limit, it uses a compact single-item JSON prompt and then a plain-text prompt with the same model. If the entry still cannot be translated because of the output token limit, it prints a warning with the entry id, leaves the entry untranslated, and continues.
 - Use `--rate-limit N` to cap total API calls per minute across all workers and retry attempts. Use `0` to disable the limiter.
-- Always run `controlfix_translations.py` after LLM translation before injecting.
+- `004_controlfix_translations.py` wraps translated text by default for `scripts`, `move_descriptions`, `ability_descriptions`, and `trade_messages`. Scripts are wrapped into dialogue pages with `\n`, `\l`, and paragraph breaks; descriptions are wrapped with regular line breaks. Tune with `--wrap-width`, `--description-wrap-width`, and `--wrap-categories`, or disable with `--no-wrap`.
+- Always run `004_controlfix_translations.py` after LLM translation before injecting.
 
 ## Ready Translations
 

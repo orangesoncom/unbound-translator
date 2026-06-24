@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from queue import Empty, Queue
 
+from lib import translation_tokens
+
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -161,9 +163,17 @@ def make_system_prompt(target):
         "Rules:\n"
         "- Return one translation for every input item.\n"
         "- Keep the same ids. Do not invent, omit, merge, or reorder ids.\n"
-        "- Preserve all control codes, placeholders, tags, and hex escapes exactly.\n"
-        "- Examples of protected tokens include \\n, \\p, \\l, \\CC12, \\btn01, "
-        "[red], [blue], {B4}, and {PLAYER}.\n"
+        "- Preserve every semantic/control token exactly and in the same count.\n"
+        "- Semantic/control tokens are protected game-engine tokens, not text to "
+        "translate. They include variables/placeholders, color tags, button icons, "
+        "byte/control escapes, quote markers, and raw byte placeholders.\n"
+        "- Examples of protected tokens include \\CC12, \\btn01, \\pk, \\mn, "
+        "\\qo, \\qc, [player], [buffer1], [red], [blue], and {B4}.\n"
+        "- The semantic_tokens field lists the exact protected tokens found in "
+        "each source item. Keep only those tokens, with the same counts.\n"
+        "- Layout markers such as line breaks, \\n, \\l, \\p, and \\pn are not "
+        "semantic tokens. They were removed before translation and will be "
+        "recomputed later, so do not add them.\n"
         "- Do not add outer quotes unless they are part of the source text.\n"
         "- Keep Pokemon species names, move names, item names, and proper nouns "
         "unchanged when there is no natural translation.\n"
@@ -176,6 +186,7 @@ def make_user_prompt(batch, target):
             "id": item["id"],
             "category": item["category"],
             "text": item["text"],
+            "semantic_tokens": item["semantic_tokens"],
         }
         for item in batch
     ]
@@ -192,7 +203,10 @@ def make_single_system_prompt(target):
     return (
         f"Translate one Pokemon Unbound text into {target}.\n"
         "Use established official Pokemon terminology when it exists.\n"
-        "Preserve all control codes, placeholders, tags, and hex escapes exactly.\n"
+        "Preserve every semantic/control token exactly and in the same count. "
+        "These are protected game-engine placeholders, color tags, button icons, "
+        "byte/control escapes, quote markers, and raw byte placeholders listed "
+        "in semantic_tokens. Do not add layout markers such as \\n, \\l, \\p, or \\pn.\n"
         "Return only valid JSON in this exact shape:\n"
         '{"translated":"translated text"}\n'
     )
@@ -205,6 +219,7 @@ def make_single_user_prompt(item, target):
             "id": item["id"],
             "category": item["category"],
             "text": item["text"],
+            "semantic_tokens": item["semantic_tokens"],
         },
         ensure_ascii=False,
     )
@@ -214,7 +229,8 @@ def make_plain_single_system_prompt(target):
     return (
         f"Translate one Pokemon Unbound text into {target}.\n"
         "Use established official Pokemon terminology when it exists.\n"
-        "Preserve all control codes, placeholders, tags, and hex escapes exactly.\n"
+        "Preserve every semantic/control token exactly and in the same count. "
+        "Do not add layout markers such as \\n, \\l, \\p, or \\pn.\n"
         "Return only the translated text. Do not return JSON. Do not explain.\n"
     )
 
@@ -361,6 +377,38 @@ def validate_translations(payload, batch):
     return [received[entry_id] for entry_id in expected_ids]
 
 
+def token_count_mismatches(expected, actual):
+    mismatches = []
+    for token in sorted(set(expected) | set(actual)):
+        expected_count = expected.get(token, 0)
+        actual_count = actual.get(token, 0)
+        if expected_count != actual_count:
+            mismatches.append(f"{token!r}: expected {expected_count}, got {actual_count}")
+    return mismatches
+
+
+def validate_semantic_tokens(batch, translations):
+    for item, translated in zip(batch, translations):
+        expected = item["semantic_token_counts"]
+        actual = translation_tokens.semantic_token_counts(translated)
+        mismatches = token_count_mismatches(expected, actual)
+        layout = translation_tokens.layout_token_counts(translated)
+        for token in sorted(layout):
+            mismatches.append(f"{token!r}: layout token added {layout[token]} time(s)")
+
+        if mismatches:
+            detail = "; ".join(mismatches[:8])
+            if len(mismatches) > 8:
+                detail += f"; +{len(mismatches) - 8} more"
+            print(
+                f"warning: semantic/control token mismatch for {item['id']}: {detail}; retrying",
+                file=sys.stderr,
+            )
+            raise RetryableTranslationError("semantic/control token mismatch in model output.")
+
+    return translations
+
+
 def validate_single_translation(payload):
     if not isinstance(payload, dict):
         raise RetryableTranslationError("API single-item response is not a JSON object.")
@@ -399,6 +447,14 @@ def compact_error_detail(text, limit=1000):
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+
+
+def warn_single_prompt(item, mode="single-item"):
+    print(
+        f"warning: {item['id']} is using the {mode} prompt without full batch context; "
+        "translation accuracy may be lower",
+        file=sys.stderr,
+    )
 
 
 class OpenAICompatibleClient:
@@ -463,7 +519,8 @@ class OpenAICompatibleClient:
             self.max_tokens,
         )
         parsed = parse_model_json(content)
-        return validate_translations(parsed, batch)
+        translations = validate_translations(parsed, batch)
+        return validate_semantic_tokens(batch, translations)
 
     def translate_single_item(self, item, target):
         try:
@@ -472,6 +529,7 @@ class OpenAICompatibleClient:
             return self.translate_single_item_plain(item, target)
 
     def translate_single_item_with_retries(self, item, target):
+        warn_single_prompt(item)
         last_error = None
         for attempt in range(1, MAX_API_ATTEMPTS + 1):
             try:
@@ -495,9 +553,11 @@ class OpenAICompatibleClient:
             self.single_item_max_tokens(),
         )
         parsed = parse_model_json(content)
-        return validate_single_translation(parsed)
+        translated = validate_single_translation(parsed)
+        return validate_semantic_tokens([item], [translated])[0]
 
     def translate_single_item_plain(self, item, target):
+        warn_single_prompt(item, "plain single-item")
         last_error = None
         for attempt in range(1, MAX_API_ATTEMPTS + 1):
             try:
@@ -508,7 +568,8 @@ class OpenAICompatibleClient:
                     ],
                     self.single_item_max_tokens(),
                 )
-                return clean_plain_translation(content)
+                translated = clean_plain_translation(content)
+                return validate_semantic_tokens([item], [translated])[0]
             except OutputTokenLimitError:
                 raise
             except RetryableTranslationError as exc:
@@ -626,9 +687,11 @@ class CodexExecClient:
             make_codex_batch_prompt(batch, target),
             BATCH_OUTPUT_SCHEMA,
         )
-        return validate_translations(parsed, batch)
+        translations = validate_translations(parsed, batch)
+        return validate_semantic_tokens(batch, translations)
 
     def translate_single_item(self, item, target):
+        warn_single_prompt(item)
         last_error = None
         for attempt in range(1, MAX_API_ATTEMPTS + 1):
             try:
@@ -636,7 +699,8 @@ class CodexExecClient:
                     make_codex_single_prompt(item, target),
                     SINGLE_OUTPUT_SCHEMA,
                 )
-                return validate_single_translation(parsed)
+                translated = validate_single_translation(parsed)
+                return validate_semantic_tokens([item], [translated])[0]
             except RetryableTranslationError as exc:
                 last_error = exc
                 if attempt == MAX_API_ATTEMPTS:
@@ -726,16 +790,25 @@ def build_work_items(data):
             already_translated += 1
             continue
 
-        original = strip_hma_quotes(entry.get("original", ""))
-        if not original:
+        prepared_source = entry.get("translation_source")
+        if isinstance(prepared_source, str):
+            text = strip_hma_quotes(prepared_source)
+        else:
+            original = strip_hma_quotes(entry.get("original", ""))
+            text, _layout = translation_tokens.remove_layout_tokens(original)
+
+        if not text:
             skipped_empty += 1
             continue
 
+        protected_tokens = translation_tokens.semantic_tokens(text)
         work.append(
             {
                 "id": entry_key(index, entry),
                 "category": entry.get("category", ""),
-                "text": original,
+                "text": text,
+                "semantic_tokens": protected_tokens,
+                "semantic_token_counts": translation_tokens.semantic_token_counts(text),
                 "entry": entry,
             }
         )
@@ -938,7 +1011,7 @@ def main():
     print(f"translatable entries: {total_translatable}")
     print(f"already translated: {already_translated}")
     print(f"missing translations: {len(work)}")
-    print(f"skipped empty originals: {skipped_empty}")
+    print(f"skipped empty translation sources: {skipped_empty}")
     print(f"auth backend: {args.auth}")
 
     if not work:

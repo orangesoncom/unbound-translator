@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from pcs_text import Charmap, fc_arg_count
+from lib.pcs_text import Charmap, fc_arg_count
 
 
 GBA_POINTER_BASE = 0x08000000

@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from pcs_text import DecodeResult, TERMINATOR, decode_pcs, hma_quote, strip_control_tokens
+from lib.pcs_text import DecodeResult, TERMINATOR, decode_pcs, hma_quote, strip_control_tokens
 
 
 GBA_POINTER_BASE = 0x08000000
@@ -69,7 +69,10 @@ SEQUENTIAL_TABLES = [
 ]
 
 POINTER_TABLES = [
-    PointerTable("ability_descriptions", "data.abilities.descriptions", 0x96DE04, 293),
+    # Unbound has 293 ability names, but the ability-description pointer table
+    # only contains valid text pointers through index 254. The following words
+    # point into non-text data and decode as control-heavy garbage.
+    PointerTable("ability_descriptions", "data.abilities.descriptions", 0x96DE04, 255),
     PointerTable("move_descriptions", "data.pokemon.moves.descriptions", 0x99F194, 922),
     PointerTable("map_names", "data.maps.names", 0x3F1CAC, 109),
 ]
