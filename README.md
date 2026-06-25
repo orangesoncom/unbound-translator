@@ -47,6 +47,8 @@ This step extracts text as-is from the ROM. It should stay lossless and should n
 
 The extractor intentionally reads 255 ability descriptions even though the ROM has 293 ability names. The words after ability-description index 254 are not text pointers and decode as garbage, so they are skipped.
 
+Opening narration and other full-screen script text is extracted into the `plain_scripts` category. These entries still use `scr_` ids, but they are kept separate from normal dialogue scripts so later layout repair can use plain full-screen line breaks instead of dialogue continuation controls.
+
 ### 2. Prepare Translation Text
 
 ```bash
@@ -168,7 +170,7 @@ Run the control-fix script after translation:
   --report out/controlfix-report.json
 ```
 
-This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes. It also recomputes layout after translation: dialogue-like text is wrapped into pages using line breaks and `\l`, while move and ability descriptions are wrapped with regular line breaks.
+This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes. It also recomputes layout after translation: dialogue-like text is wrapped into pages using line breaks and `\l`, while `plain_scripts`, move descriptions, and ability descriptions are wrapped with regular line breaks.
 
 ### 5. Inject Translation
 
@@ -183,6 +185,8 @@ The output ROM will be written to:
 ```bash
 out/unbound-translated.gba
 ```
+
+For `plain_scripts`, the injector preserves full-screen blank lines as repeated newline bytes (`0xFE 0xFE`) instead of the paragraph/prompt byte (`0xFB`). This avoids the bottom-arrow prompt behavior used by normal dialogue boxes.
 
 ## Ready Translations
 

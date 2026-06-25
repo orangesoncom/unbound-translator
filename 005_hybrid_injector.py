@@ -74,8 +74,42 @@ def normalize_text_escapes(text):
     return text
 
 
-def encode_text(cmap, text):
-    return bytes(cmap.encode(normalize_text_escapes(strip_hma_quotes(text))))
+def normalize_plain_script_layout(text):
+    """Encode full-screen script layout with raw newlines, never prompt-clear."""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    pieces = []
+    index = 0
+
+    while index < len(text):
+        if text[index] == "\n":
+            pieces.append("\\n")
+            index += 1
+            continue
+        if text.startswith("\\pn", index):
+            pieces.append("\\n\\n")
+            index += 3
+            continue
+        if text.startswith("\\p", index) and not text.startswith("\\pk", index):
+            pieces.append("\\n\\n")
+            index += 2
+            continue
+        if text.startswith("\\l", index):
+            pieces.append("\\n")
+            index += 2
+            continue
+
+        pieces.append(text[index])
+        index += 1
+
+    return "".join(pieces)
+
+
+def encode_text(cmap, text, *, plain_script=False):
+    text = strip_hma_quotes(text)
+    if plain_script:
+        text = normalize_plain_script_layout(text)
+    return bytes(cmap.encode(normalize_text_escapes(text)))
 
 
 def truncate_encoded(encoded, max_size):
@@ -388,7 +422,11 @@ def main():
         try:
             address = parse_address(entry["address"])
             max_size = int(entry["byte_length"])
-            encoded = encode_text(cmap, translated)
+            encoded = encode_text(
+                cmap,
+                translated,
+                plain_script=entry.get("category") == "plain_scripts",
+            )
         except Exception as exc:
             stats["encode_errors"] += 1
             if args.verbose:

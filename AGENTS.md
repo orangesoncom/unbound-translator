@@ -36,8 +36,9 @@ When resuming LLM translation, use the same input and output paths with `--resum
 
 ## Extraction Notes
 
-- A healthy baseline extraction currently reports about `13,695` entries and about `8,897` script entries.
+- A healthy baseline extraction currently reports about `13,695` entries, with about `8,883` `scripts` entries and `14` `plain_scripts` entries.
 - Ability names have 293 entries, but `data.abilities.descriptions` only has 255 valid text pointers. Do not expand `ability_descriptions` to match the ability-name count; entries after index 254 decode non-text data as garbage.
+- Opening narration and other full-screen script text is categorized as `plain_scripts` by the extractor. These entries still use `scr_` ids, but controlfix must wrap them with plain line breaks instead of dialogue `\l` controls.
 - `Pointer text rejected` in extractor output means candidate pointers were checked and discarded because they did not decode as plausible text. It does not mean translations failed.
 - Do not blindly accept all rejected pointer candidates. If text is missing, add or refine the pointer-source pattern for the specific game system that owns that text.
 - Known strings such as `Choose a character.` and `Choose a skin tone.` are extracted through the script/menu `0x67` pointer pattern.
@@ -61,8 +62,9 @@ When resuming LLM translation, use the same input and output paths with `--resum
 - `003_llm_translate.py` retries transient API failures up to 3 total attempts. It does not retry unauthorized, forbidden, rate-limit, other 4xx client errors, or partial/mismatched translation batches.
 - If a batch reaches the API output token limit, `003_llm_translate.py` falls back to translating entries individually. If a single-entry request still reaches the limit, it uses a compact single-item JSON prompt and then a plain-text prompt with the same model. If the entry still cannot be translated because of the output token limit, it prints a warning with the entry id, leaves the entry untranslated, and continues.
 - Use `--rate-limit N` to cap total API calls per minute across all workers and retry attempts. Use `0` to disable the limiter.
-- `004_controlfix_translations.py` wraps translated text by default for `scripts`, `move_descriptions`, `ability_descriptions`, and `trade_messages`. Scripts are wrapped into dialogue pages with `\n`, `\l`, and paragraph breaks; descriptions are wrapped with regular line breaks. Tune with `--wrap-width`, `--description-wrap-width`, and `--wrap-categories`, or disable with `--no-wrap`.
+- `004_controlfix_translations.py` wraps translated text by default for `scripts`, `plain_scripts`, `move_descriptions`, `ability_descriptions`, and `trade_messages`. Normal `scripts` entries are wrapped into dialogue pages with `\n`, `\l`, and paragraph breaks. `plain_scripts` entries are full-screen script text and must use plain line breaks. Descriptions are wrapped with regular line breaks. Tune with `--wrap-width`, `--description-wrap-width`, and `--wrap-categories`, or disable with `--no-wrap`.
 - Always run `004_controlfix_translations.py` after LLM translation before injecting.
+- During injection, `plain_scripts` blank lines are encoded as repeated newline bytes (`0xFE 0xFE`) instead of the paragraph/prompt byte (`0xFB`), because the full-screen renderer shows the bottom arrow and can overflow when it receives `0xFB`.
 
 ## Debug Workflow
 
@@ -71,7 +73,7 @@ Use this to test a small manually whitelisted ROM build:
 ```bash
 ./001_extract_unbound_text.py rom/unbound.gba -o out/debug-unbound-texts.json
 ./002_prepare_translation_text.py out/debug-unbound-texts.json -o out/debug-unbound-texts-prepared.json
-./003_llm_translate.py out/debug-unbound-texts-prepared.json --target it --api-base https://opencode.ai/zen/go/v1 --api-key YOUR_API_KEY --model your-model-name --workers 4 --batch-size 20 --include-ids scr_07448,scr_05226,scr_05227,scr_07449 --include-id-ranges scr_09023-scr_09114 --include-category-prefixes menu_ -o out/debug-unbound-texts-it.json --overwrite
+./003_llm_translate.py out/debug-unbound-texts-prepared.json --target it --api-base https://opencode.ai/zen/go/v1 --api-key YOUR_API_KEY --model your-model-name --workers 4 --batch-size 20 --include-ids scr_07448,scr_05226,scr_05227,scr_07449 --include-id-ranges scr_09019-scr_09114 --include-category-prefixes menu_ -o out/debug-unbound-texts-it.json --overwrite
 ./004_controlfix_translations.py out/debug-unbound-texts-it.json -o out/debug-unbound-texts-it-controlfix.json --source out/debug-unbound-texts-prepared.json --report out/debug-controlfix-report.json
 ./005_hybrid_injector.py rom/unbound.gba out/debug-unbound-texts-it-controlfix.json -o out/debug-unbound-translated.gba --map-output out/debug-hybrid-map.json
 ```

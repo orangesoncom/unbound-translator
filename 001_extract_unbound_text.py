@@ -17,6 +17,23 @@ from lib.pcs_text import DecodeResult, TERMINATOR, decode_pcs, hma_quote, strip_
 GBA_POINTER_BASE = 0x08000000
 DEFAULT_MIN_POINTER_TARGET = 0x100
 DEFAULT_MAX_TEXT_LENGTH = 0x800
+# Full-screen opening narration text. These are still script pointers, but the
+# renderer uses plain line breaks instead of dialogue-box continuation controls.
+PLAIN_SCRIPT_TEXT_RANGES = (
+    (0x1F11016, 0x1F110D5),
+    (0x1F117E3, 0x1F1187C),
+    (0x1F11CFD, 0x1F11D10),
+)
+PLAIN_SCRIPT_TEXT_ADDRESSES = {
+    0x1C5A04,
+    0x1C5A6B,
+    0x8CE9CB,
+    0x8CEA72,
+    0x1F0F5A6,
+    0x1F0F64D,
+    0x1F0F6FA,
+    0x1F0F79C,
+}
 
 
 @dataclass(frozen=True)
@@ -310,6 +327,15 @@ def make_entry(
     return entry
 
 
+def pointer_text_category(target: int) -> str:
+    if target in PLAIN_SCRIPT_TEXT_ADDRESSES:
+        return "plain_scripts"
+    for start, end in PLAIN_SCRIPT_TEXT_RANGES:
+        if start <= target < end:
+            return "plain_scripts"
+    return "scripts"
+
+
 def extract_fixed_table(
     rom: bytes,
     table: FixedTable,
@@ -496,7 +522,7 @@ def scan_pointer_texts(
         entries.append(
             make_entry(
                 f"scr_{start_index + script_index:05d}",
-                "scripts",
+                pointer_text_category(target),
                 target,
                 result,
                 result.byte_length,

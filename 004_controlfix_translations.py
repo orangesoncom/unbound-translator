@@ -43,7 +43,7 @@ COLOR_TOKENS = {
     "[darknavyblue]",
 }
 
-DEFAULT_WRAP_CATEGORIES = "scripts,move_descriptions,ability_descriptions,trade_messages"
+DEFAULT_WRAP_CATEGORIES = "scripts,plain_scripts,move_descriptions,ability_descriptions,trade_messages"
 DESCRIPTION_CATEGORIES = {"move_descriptions", "ability_descriptions"}
 
 
@@ -375,13 +375,31 @@ def join_script_lines(lines):
     return "\n\n".join(pages)
 
 
-def join_wrapped_lines(lines, entry):
+def join_plain_script_lines(lines, original):
+    original_text = strip_hma_quotes(original)
+    original_pages = [page for page in re.split(r"\n{2,}|\\p", original_text) if page.strip()]
+    max_lines = max(
+        [len([line for line in page.splitlines() if line.strip()]) for page in original_pages] or [2]
+    )
+    max_lines = max(1, max_lines)
+
+    pages = []
+    for start in range(0, len(lines), max_lines):
+        page = lines[start : start + max_lines]
+        if page:
+            pages.append("\n".join(page))
+    return "\n\n".join(pages)
+
+
+def join_wrapped_lines(lines, entry, original):
     if entry.get("category") in DESCRIPTION_CATEGORIES:
         return "\n".join(lines)
+    if entry.get("category") == "plain_scripts":
+        return join_plain_script_lines(lines, original)
     return join_script_lines(lines)
 
 
-def wrap_translation(text, entry, args, wrap_categories):
+def wrap_translation(text, entry, original, args, wrap_categories):
     if args.no_wrap or entry.get("category") not in wrap_categories:
         return text, False, 0, False
     if should_skip_wrap(text):
@@ -392,7 +410,7 @@ def wrap_translation(text, entry, args, wrap_categories):
         return text, False, 0, False
 
     lines, long_words = wrap_words(plain_text, wrap_width_for_entry(entry, args))
-    wrapped = join_wrapped_lines(lines, entry)
+    wrapped = join_wrapped_lines(lines, entry, original)
     return wrapped, wrapped != text, long_words, False
 
 
@@ -514,7 +532,7 @@ def main():
         text = next_text
 
         next_text, wrapped, long_words, skipped_wrap = wrap_translation(
-            text, entry, args, wrap_categories
+            text, entry, original, args, wrap_categories
         )
         stats["wrapped"] += int(wrapped)
         stats["wrap_long_words"] += long_words

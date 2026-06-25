@@ -51,6 +51,7 @@ CATEGORY_PRIORITY = {
     "move_names": 6_000,
     "move_descriptions": 4_000,
     "ability_descriptions": 4_000,
+    "plain_scripts": 1_500,
     "scripts": 1_000,
     "pokemon_names": 100,
 }
