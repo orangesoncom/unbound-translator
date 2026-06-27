@@ -338,6 +338,10 @@ def make_system_prompt(target):
         "\\qo, \\qc, [player], [buffer1], [red], [blue], and {B4}.\n"
         "- The semantic_tokens field lists the exact protected tokens found in "
         "each source item. Keep only those tokens, with the same counts.\n"
+        "- The semantic_token_counts field maps each exact protected token name "
+        "to the number of times it MUST appear in your translation. Your output "
+        "must contain exactly those token names with exactly those counts: no "
+        "more, no fewer, none added, none renamed.\n"
         "- Layout markers such as line breaks, \\n, \\l, \\p, and \\pn are not "
         "semantic tokens. They were removed before translation and will be "
         "recomputed later, so do not add them.\n"
@@ -347,6 +351,10 @@ def make_system_prompt(target):
     )
 
 
+def token_counts_to_dict(counts):
+    return {token: counts[token] for token in sorted(counts)}
+
+
 def make_user_prompt(batch, target):
     items = [
         {
@@ -354,6 +362,7 @@ def make_user_prompt(batch, target):
             "category": item["category"],
             "text": item["text"],
             "semantic_tokens": item["semantic_tokens"],
+            "semantic_token_counts": token_counts_to_dict(item["semantic_token_counts"]),
         }
         for item in batch
     ]
@@ -373,7 +382,10 @@ def make_single_system_prompt(target):
         "Preserve every semantic/control token exactly and in the same count. "
         "These are protected game-engine placeholders, color tags, button icons, "
         "byte/control escapes, quote markers, and raw byte placeholders listed "
-        "in semantic_tokens. Do not add layout markers such as \\n, \\l, \\p, or \\pn.\n"
+        "in semantic_tokens. The semantic_token_counts field maps each exact "
+        "token name to the number of times it MUST appear in your translation; "
+        "match those names and counts exactly. Do not add layout markers such as "
+        "\\n, \\l, \\p, or \\pn.\n"
         "Return only valid JSON in this exact shape:\n"
         '{"translated":"translated text"}\n'
     )
@@ -387,6 +399,7 @@ def make_single_user_prompt(item, target):
             "category": item["category"],
             "text": item["text"],
             "semantic_tokens": item["semantic_tokens"],
+            "semantic_token_counts": token_counts_to_dict(item["semantic_token_counts"]),
         },
         ensure_ascii=False,
     )
@@ -397,7 +410,9 @@ def make_plain_single_system_prompt(target):
         f"Translate one Pokemon Unbound text into {target}.\n"
         "Use established official Pokemon terminology when it exists.\n"
         "Preserve every semantic/control token exactly and in the same count. "
-        "Do not add layout markers such as \\n, \\l, \\p, or \\pn.\n"
+        "The semantic_token_counts field maps each exact token name to the number "
+        "of times it MUST appear in your translation; match those names and counts "
+        "exactly. Do not add layout markers such as \\n, \\l, \\p, or \\pn.\n"
         "Return only the translated text. Do not return JSON. Do not explain.\n"
     )
 
