@@ -70,6 +70,14 @@ class PointerTable:
     count: int
 
 
+@dataclass(frozen=True)
+class ManualTextRange:
+    category: str
+    table_name: str
+    start: int
+    end: int
+
+
 FIXED_TABLES = [
     FixedTable("pokemon_names", "data.pokemon.names", 0x166A98C, 1294, 11),
     FixedTable("type_names", "data.pokemon.type.names", 0xA4EAD4, 24, 7),
@@ -118,6 +126,8 @@ DEFAULT_MENU_AUDIT_STRINGS = [
     "Cube V3",
     "Save Game",
     "Game Settings",
+    "L-Button Mode",
+    "R-Button Mode",
     "Puzzle Difficulty",
     "General Options",
     "Player",
@@ -462,6 +472,20 @@ MANUAL_TEXT_TABLES = {
 }
 
 
+MANUAL_TEXT_RANGES = [
+    ManualTextRange("menu_game_settings", "data.menus.text.gameSettings.range", 0x1F4DA6C, 0x1F4E26F),
+    ManualTextRange("menu_item_storage", "data.text.menu.itemStorage.range", 0x417706, 0x4178C0),
+    ManualTextRange("menu_list_labels", "data.menus.text.lists", 0x4178D0, 0x4181E4),
+    ManualTextRange("menu_pc", "data.menus.text.pc.range", 0x418468, 0x418740),
+    ManualTextRange("menu_cube_system", "data.menus.text.cube.system", 0xA4E047, 0xA4E1C9),
+    ManualTextRange("menu_link_controls", "data.menus.text.linkControls.range", 0x41DF4C, 0x41E147),
+    ManualTextRange("menu_link_controls", "data.menus.text.linkControls.cancel", 0x41E76B, 0x41E7A3),
+    ManualTextRange("menu_saving_messages", "data.menus.text.savingMessages.card", 0x41ED50, 0x41ED9C),
+    ManualTextRange("menu_mining", "data.menus.text.mining", 0x1F8225D, 0x1F82358),
+    ManualTextRange("credits_text", "data.text.credits", 0x41D3BE, 0x41D45A),
+]
+
+
 def find_pointer_sources(rom: bytes, target: int) -> list[int]:
     pointer = (GBA_POINTER_BASE + target).to_bytes(4, "little")
     sources = []
@@ -501,6 +525,14 @@ def looks_like_table_text(result: DecodeResult, allow_empty: bool = False) -> bo
     if allow_empty and not clean:
         return True
     return bool(clean)
+
+
+def looks_like_manual_range_text(result: DecodeResult) -> bool:
+    if not looks_like_table_text(result):
+        return False
+    clean = visible_text(result.text)
+    ascii_letters = sum(1 for char in clean if char.isascii() and char.isalpha())
+    return ascii_letters > 0
 
 
 def looks_like_pointer_text(result: DecodeResult) -> bool:
@@ -749,6 +781,38 @@ def extract_manual_tables(
                 )
             )
             next_table_id += 1
+
+    for manual_range in MANUAL_TEXT_RANGES:
+        cursor = manual_range.start
+        index = 0
+        while cursor < manual_range.end:
+            if cursor in known_targets:
+                result = decode_pcs(rom, cursor, DEFAULT_MAX_TEXT_LENGTH)
+                cursor += max(result.byte_length, 1)
+                continue
+            result = decode_pcs(rom, cursor, manual_range.end - cursor)
+            if not looks_like_manual_range_text(result):
+                cursor += 1
+                continue
+            known_targets.add(cursor)
+            pointer_sources = find_pointer_sources(rom, cursor)
+            known_pointer_sources.update(pointer_sources)
+            entries.append(
+                make_entry(
+                    f"tbl_{manual_range.category}_{next_table_id:05d}",
+                    manual_range.category,
+                    cursor,
+                    result,
+                    result.byte_length,
+                    bool(pointer_sources),
+                    pointer_sources,
+                    manual_range.table_name,
+                    index,
+                )
+            )
+            cursor += max(result.byte_length, 1)
+            next_table_id += 1
+            index += 1
     return entries, next_table_id
 
 
