@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unbound Debug Build"
+  short_description: "Run focused debug translation and ROM build workflows."
+  default_prompt: "Use $unbound-debug-build to build or verify a small Pokemon Unbound debug ROM."

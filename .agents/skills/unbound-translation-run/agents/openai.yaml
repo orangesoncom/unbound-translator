@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unbound Translation Run"
+  short_description: "Prepare, translate, resume, and validate translation JSON."
+  default_prompt: "Use $unbound-translation-run to run or resume Pokemon Unbound translation."

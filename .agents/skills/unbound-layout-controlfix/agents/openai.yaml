@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unbound Layout Controlfix"
+  short_description: "Repair control tokens and translation layout issues."
+  default_prompt: "Use $unbound-layout-controlfix to fix Pokemon Unbound control codes or text overflow."

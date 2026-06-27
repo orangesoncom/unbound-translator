@@ -80,6 +80,21 @@ Use this to test a small manually whitelisted ROM build:
 ./005_hybrid_injector.py rom/unbound.gba out/debug-unbound-texts-it-controlfix.json -o out/debug-unbound-translated.gba --map-output out/debug-hybrid-map.json
 ```
 
+## Codex Project Config
+
+- Project Codex config lives in `.codex/config.toml`. It uses low verbosity, medium reasoning, workspace-write sandboxing, on-request approvals, disabled default web search, and subagent limits of 6 threads, depth 1, and 1800 seconds per job.
+- Custom project subagents live in `.codex/agents/`. They are intentionally narrow and terse; use them when explicitly asked to delegate or run parallel agent work.
+- Repo skills live in `.agents/skills/`. Use them for repeated workflows: `unbound-menu-extraction`, `unbound-debug-build`, `unbound-translation-run`, `unbound-layout-controlfix`, `unbound-injection-qa`, and `unbound-docs-sync`.
+- Available subagents:
+  - `extractor-scout`: missing ROM text/menu extraction coverage, PCS hits, pointer sources, and vetted range proposals.
+  - `pcs-codec-guardian`: PCS charmap, terminators, control bytes, raw escapes, and encode/decode round trips.
+  - `translation-token-auditor`: semantic/control token preservation across prepare, translation, and controlfix.
+  - `layout-reviewer`: wrapping and overflow risks for dialogue, plain scripts, descriptions, and menus.
+  - `injector-safety`: hybrid injection risks, relocation, free-space allocation, pointer updates, and map output.
+  - `localization-glossary`: Pokemon terminology, UI wording, casing, placeholders, and repeated-string consistency.
+  - `pipeline-qa`: compact verification runs and metrics for extraction, controlfix, injection, and debug builds.
+  - `docs-sync`: README/AGENTS drift; this agent must also compact `AGENTS.md` by merging duplicates and removing stale detail when docs grow.
+
 ## Ready Translations
 
 - `ready-translations/` contains pretranslated assets in JSON and BPS patch format.

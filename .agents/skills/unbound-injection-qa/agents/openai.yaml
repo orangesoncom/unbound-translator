@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unbound Injection QA"
+  short_description: "Check hybrid injector safety, relocation, and map output."
+  default_prompt: "Use $unbound-injection-qa to verify Pokemon Unbound ROM injection safety."

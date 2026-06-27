@@ -169,6 +169,10 @@ This launches the full workflow on a manually whitelisted translation set. It is
 
 All entries outside the whitelist are omitted from `out/debug-unbound-texts-it.json`, which keeps the debug JSON smaller and easier to inspect.
 
+### Codex Project Agents
+
+Project-scoped Codex settings live in `.codex/config.toml`, custom subagents live in `.codex/agents/`, and reusable repo skills live in `.agents/skills/`. They cover extraction coverage, debug builds, translation runs, controlfix/layout repair, injector QA, docs sync, and bounded parallel review.
+
 ### 4. Repair Control Codes And Layout
 
 Run the control-fix script after translation:

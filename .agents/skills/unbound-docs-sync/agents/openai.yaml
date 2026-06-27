@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unbound Docs Sync"
+  short_description: "Keep docs and Codex config aligned."
+  default_prompt: "Use $unbound-docs-sync to update and compact Pokemon Unbound project docs."
