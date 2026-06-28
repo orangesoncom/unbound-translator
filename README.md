@@ -18,6 +18,7 @@ The current injector uses a hybrid strategy:
 - Script pointers are then updated to point at the relocated translated text.
 
 This avoids expanding the ROM while still allowing longer translations where the original text was pointer-based.
+By default, the injector only relocates pointer-based text when the encoded translation no longer fits its original slot. Use `--pointer-policy changed` only for experiments that intentionally relocate every changed pointer string.
 
 ## Free Space
 

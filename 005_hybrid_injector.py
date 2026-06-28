@@ -339,8 +339,8 @@ def main():
     parser.add_argument(
         "--pointer-policy",
         choices=("changed", "oversized"),
-        default="changed",
-        help="Relocate all changed pointer text, or only pointer text too large for its original slot.",
+        default="oversized",
+        help="Relocate all changed pointer text, or only pointer text too large for its original slot. Default: oversized",
     )
     parser.add_argument(
         "--pad-byte",
