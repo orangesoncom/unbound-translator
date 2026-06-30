@@ -18,6 +18,8 @@ The current injector uses a hybrid strategy:
 - Script pointers are then updated to point at the relocated translated text.
 
 This avoids expanding the ROM while still allowing longer translations where the original text was pointer-based.
+By default, the injector only relocates pointer-based text when the encoded translation no longer fits its original slot. Use `--pointer-policy changed` only for experiments that intentionally relocate every changed pointer string.
+Some common engine routine strings are marked with `no_relocation: true` during extraction. These entries must stay in their original slots because redirecting their pointers can freeze receive-item, Cube, PC, or field routines. Keep their translations short enough to fit their original `byte_length`; the injector will never relocate them and reports `No-reloc truncated` if any are too long.
 
 ## Free Space
 
@@ -49,7 +51,7 @@ The extractor intentionally reads 255 ability descriptions even though the ROM h
 
 Opening narration and other full-screen script text is extracted into the `plain_scripts` category. These entries still use `scr_` ids, but they are kept separate from normal dialogue scripts so later layout repair can use plain full-screen line breaks instead of dialogue continuation controls.
 
-Manual menu entries are extracted for common UI, Cube V3, save, game settings, PC, party, item storage, link control, battle, trainer-card, multiplayer, standalone label, and options text. The extractor uses explicit addresses plus narrow vetted PCS ranges for contiguous menu blocks, including the newer Trainer Card profile labels and month names at `0x1F81E44-0x1F81EE5`. When the ROM contains exact GBA pointers to those manual strings, it records those pointer sources so the hybrid injector can relocate longer translations.
+Manual entries are extracted for common UI, Cube V3, save, game settings, PC, party, item storage, link control, battle, trainer-card, multiplayer, standalone label, options, item descriptions, battle messages, Pokemon summary text, and mission log/objective text. The extractor uses explicit addresses plus narrow vetted PCS ranges for contiguous text blocks, including mission-log menu filters/status labels at `0x1F56040-0x1F56117`, battle-setting labels at `0x1F94185-0x1F94480`, and the newer Trainer Card profile labels and month names at `0x1F81E44-0x1F81EE5`. It also accepts direct high-bank text pointers from `0x1E70000-0x1EB6000` to targets in `0x1F00000-0x1FB0000`, covering many mission names, descriptions, objectives, and late NPC lines that do not use normal script loadpointer opcodes. When the ROM contains exact GBA pointers to those manual strings, it records those pointer sources so the hybrid injector can relocate longer translations.
 
 To audit menu coverage during extraction, search the ROM for PCS-encoded UI strings and compare the hits against the extracted entries:
 
@@ -67,7 +69,7 @@ This is an optional extraction check, not a separate workflow stage. It reports 
 
 This adds a `translation_source` field to each entry. The `original` field stays untouched, while `translation_source` removes layout markers such as actual line breaks, `\n`, `\l`, `\p`, and `\pn`.
 
-Semantic/control tokens are preserved because the game engine needs them. Examples include variables like `[player]`, buffer placeholders like `[buffer1]`, color tags like `[red]`, byte/control escapes like `\CC12`, button icons like `\btn01`, Pokémon glyph tokens like `\pk` and `\mn`, quote tokens like `\qo` and `\qc`, and raw byte placeholders like `{B4}`.
+Semantic/control tokens are preserved in `original` because the game engine needs them. In `translation_source`, they are replaced with readable placeholders such as `[player-name-1]`, `[buffer1-2]`, `[color-red-3]`, `[button-icon-4]`, or `[control-code-5]`. The matching real tokens are stored in `semantic_token_placeholders` so the translator can restore them after the LLM responds. Examples of real tokens include variables like `[player]`, buffer placeholders like `[buffer1]`, color tags like `[red]`, byte/control escapes like `\CC12`, button icons like `\btn01`, Pokémon glyph tokens like `\pk` and `\mn`, quote tokens like `\qo` and `\qc`, and raw byte placeholders like `{B4}`.
 
 ### 3. Translate Text
 
@@ -98,7 +100,7 @@ If the translation is interrupted, resume from the existing output JSON:
 
 The script defaults to an OpenAI-compatible chat completions API. It validates every returned batch. If a batch reaches the API output token limit, the script falls back to translating each entry individually; if a single-entry request still reaches the limit, it retries that entry with a compact single-item prompt and then a plain-text prompt using the same model. If the entry still cannot be translated because of the output token limit, the script prints a warning with the entry id, leaves that entry untranslated, and continues.
 
-The translator uses `translation_source` when present. After each model response, it checks that every semantic/control token from the English source is still present in the translation with the same count, and that no extra protected tokens or layout markers were added. If the check fails, it prints a warning and retries the translation.
+The translator uses `translation_source` when present. It asks the model to preserve the readable placeholders, replaces those placeholders with the original semantic/control tokens after each response, then checks that every protected token from the English source is present with the same count and that no extra protected tokens or layout markers were added. If the check fails, it prints a warning and retries the translation.
 
 If the script has to fall back to a single-entry prompt, it prints a warning with the affected entry id. These cases use less context than the normal batch prompt and may produce less accurate translations, so they are worth reviewing and keeping as rare as possible.
 
@@ -184,7 +186,7 @@ Run the control-fix script after translation:
   --report out/controlfix-report.json
 ```
 
-This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes. It also recomputes layout after translation: dialogue-like text is wrapped into pages using line breaks and `\l`, while `plain_scripts`, move descriptions, and ability descriptions are wrapped with regular line breaks. Compact multi-row menu labels keep their original row breaks, which is required for selectable choices such as `Yes\nNo`.
+This step is still needed. It repairs common translation damage such as broken control codes, misplaced braces, outer quotes, and apostrophes. It also recomputes layout after translation: dialogue-like text is wrapped into pages using line breaks and `\l`, while `plain_scripts`, descriptions, mission objectives, Pokémon summary text, and battle messages are wrapped with regular line breaks. Item descriptions use a wider 3-line layout by default. Compact multi-row menu labels keep their original row breaks, which is required for selectable choices such as `Yes\nNo`.
 
 ### 5. Inject Translation
 
@@ -223,7 +225,7 @@ The scripts have been tested with the Italian language. Support for other langua
 
 - The injector does not expand the ROM.
 - Pointer-based text may be relocated into existing `0xFF` free space.
-- Fixed-size text that cannot be relocated may still need shorter translations.
+- Fixed-size text and `no_relocation` pointer text may still need shorter translations.
 - `hybrid-map.json` records relocation decisions and injection stats.
 - Issues and pull requests are welcome.
 - Yes, this repo is vibecoded, I'm sorry but I don't have time to manually work on this...

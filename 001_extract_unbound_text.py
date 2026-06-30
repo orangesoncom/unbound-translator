@@ -41,6 +41,28 @@ PLAIN_SCRIPT_TEXT_ADDRESSES = {
     0x1F0F79C,
 }
 
+# Extra high-bank data/script tables use direct text pointers without the usual
+# script loadpointer opcode. This captures many mission names/descriptions and
+# late-game NPC lines that would otherwise be invisible to pointer scanning.
+ADDITIONAL_TEXT_POINTER_SOURCE_RANGES = (
+    (0x1E70000, 0x1EB6000),
+)
+ADDITIONAL_TEXT_POINTER_TARGET_RANGES = (
+    (0x1F00000, 0x1FB0000),
+)
+
+# Some engine/common-routine text pointers are not safe to redirect even when
+# the text is pointer-based. Keep these strings in their original slots.
+NO_RELOCATION_POINTER_SOURCE_RANGES = (
+    (0x1A6500, 0x1A6D00),  # common item/PC/field routine messages
+    (0x1A8C00, 0x1A9300),  # common field/heal/item routine messages
+    (0x9A4800, 0x9A4930),  # receive-item variants
+    (0x879000, 0x879064),  # key-item structs, including Braille Converter
+    (0x3E0718, 0x3E0724),  # Cube sector labels
+    (0x452CF0, 0x452D08),  # Cube pocket labels
+    (0xA6D180, 0xA6D1A8),  # Cube V3 menu labels
+)
+
 
 @dataclass(frozen=True)
 class FixedTable:
@@ -487,6 +509,27 @@ MANUAL_TEXT_RANGES = [
 
 POST_POINTER_MANUAL_TEXT_RANGES = [
     ManualTextRange("menu_trainer_card", "data.menus.text.trainerCard.profile", 0x1F81E44, 0x1F81EE5),
+    ManualTextRange("item_descriptions", "data.items.descriptions", 0x3D4F00, 0x3DB020),
+    ManualTextRange("item_descriptions", "data.items.descriptions.extraBalls", 0x7B3EB0, 0x7B4468),
+    ManualTextRange("item_descriptions", "data.items.descriptions.unboundKeyItems", 0xEB1F16, 0xEB20E8),
+    ManualTextRange("item_descriptions", "data.items.descriptions.unboundMedicine", 0xEB2308, 0xEB27D8),
+    ManualTextRange("item_descriptions", "data.items.descriptions.unboundBerries", 0xEB2CCB, 0xEB31BE),
+    ManualTextRange("battle_messages", "data.battle.text.messages", 0x3FB500, 0x3FE780),
+    ManualTextRange("battle_messages", "data.battle.text.frostbite", 0xA4B23C, 0xA4B4DC),
+    ManualTextRange("battle_messages", "data.battle.text.wildEncounter", 0x8BD140, 0x8BD155),
+    ManualTextRange("battle_messages", "data.battle.text.wildEncounter.fragments", 0x8BD155, 0x8BD15F),
+    ManualTextRange("battle_messages", "data.battle.text.wildEncounter.unbound", 0xA4C515, 0xA4C5DD),
+    ManualTextRange("battle_messages", "data.battle.text.unboundResult", 0xA4C636, 0xA4C925),
+    ManualTextRange("battle_messages", "data.battle.text.safariEncounter", 0x1F68219, 0x1F6826A),
+    ManualTextRange("menu_battle", "data.menus.text.battle.partyOptions", 0x41697E, 0x4169D8),
+    ManualTextRange("menu_pokemon_summary", "data.menus.text.pokemonSummary", 0x419782, 0x419C51),
+    ManualTextRange("mission_log", "data.menus.text.missionLog.notifications", 0x1FB003F, 0x1FB00A8),
+    ManualTextRange("mission_objectives", "data.missions.objectives.mainStory", 0x1F56117, 0x1F56B77),
+    ManualTextRange("mission_descriptions", "data.missions.descriptions.amIBlind", 0x1F1F8AB, 0x1F1F8F0),
+    ManualTextRange("menu_game_settings", "data.menus.text.gameSettings.extraPrompts", 0x1F4E274, 0x1F4E515),
+    ManualTextRange("menu_cube_system", "data.menus.text.cube.components", 0xA4E4A2, 0xA4E4E4),
+    ManualTextRange("menu_battle", "data.menus.text.battle.settings", 0x1F94185, 0x1F94480),
+    ManualTextRange("mission_log", "data.menus.text.missionLog.menu", 0x1F56040, 0x1F56117),
 ]
 
 
@@ -622,7 +665,17 @@ def make_entry(
         entry["table_name"] = table_name
     if table_index is not None:
         entry["table_index"] = table_index
+    if no_relocation_pointer_sources(pointer_sources or []):
+        entry["no_relocation"] = True
     return entry
+
+
+def no_relocation_pointer_sources(pointer_sources: list[int]) -> bool:
+    for source in pointer_sources:
+        for start, end in NO_RELOCATION_POINTER_SOURCE_RANGES:
+            if start <= source < end:
+                return True
+    return False
 
 
 def pointer_text_category(target: int) -> str:
@@ -841,10 +894,10 @@ def scan_pointer_texts(
     for source in range(0, len(rom) - 3):
         if source in known_pointer_sources:
             continue
-        if not all_pointers and not is_script_text_pointer_source(rom, source):
-            continue
         target = pointer_at(rom, source)
         if target is None:
+            continue
+        if not all_pointers and not is_text_pointer_source(rom, source, target):
             continue
         stats["raw_pointers"] += 1
         if target < min_target or target in known_targets:
@@ -875,6 +928,10 @@ def scan_pointer_texts(
     return entries, stats
 
 
+def is_text_pointer_source(rom: bytes, source: int, target: int) -> bool:
+    return is_script_text_pointer_source(rom, source) or is_additional_text_pointer_source(source, target)
+
+
 def is_script_text_pointer_source(rom: bytes, source: int) -> bool:
     if source >= 2 and rom[source - 2] == 0x0F and rom[source - 1] <= 0x03:
         return True
@@ -883,6 +940,12 @@ def is_script_text_pointer_source(rom: bytes, source: int) -> bool:
     # Restrict this broader pattern to the high script bank to avoid random
     # code/data pointers that happen to be preceded by 0x67.
     return source >= 1 and rom[source - 1] == 0x67 and (source >> 20) == 0x1E
+
+
+def is_additional_text_pointer_source(source: int, target: int) -> bool:
+    return any(start <= source < end for start, end in ADDITIONAL_TEXT_POINTER_SOURCE_RANGES) and any(
+        start <= target < end for start, end in ADDITIONAL_TEXT_POINTER_TARGET_RANGES
+    )
 
 
 def scan_orphan_texts(
